@@ -46,10 +46,11 @@ func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool) {
 		<- timer.C
 		timer.Reset(time.Millisecond*time.Duration(*pingInterval))
 		timeStart := time.Now()
-		_, err := net.DialTimeout("tcp", remote, time.Millisecond*time.Duration(*pingInterval))
+		conn, err := net.DialTimeout("tcp", remote, time.Millisecond*time.Duration(*pingInterval))
 		newSample := *pingInterval
 		if err == nil {
 			newSample = int(time.Since(timeStart).Milliseconds())
+			conn.Close()
 		}
 		samples = append(samples[1:], newSample)
 	}
