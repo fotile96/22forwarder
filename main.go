@@ -26,17 +26,19 @@ func sliceAvg(s []int) int {
 	return ret / len(s)
 }
 
-func RTTworker(remote string, conn net.Conn, client net.Conn) {
+func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool) {
 	// if remote is up, close both conn and client
 	samples := make([]int, *RTTSmoothWindowSize)
-	for i, _ := range(samples) {
-		samples[i] = *pingInterval
+	if closeOnUp {
+		for i, _ := range (samples) {
+			samples[i] = *pingInterval
+		}
 	}
 	timer := time.NewTimer(0)
 	for {
 		measuredRTT := sliceAvg(samples)
 		log.Printf("Measured RTT to %s: %d ms.", remote, measuredRTT)
-		if measuredRTT <= *majorUpThresh {
+		if (closeOnUp && measuredRTT <= *majorUpThresh) || (!closeOnUp && measuredRTT > *majorUpThresh) {
 			defer conn.Close()
 			defer client.Close()
 			return
@@ -77,9 +79,7 @@ func forward(conn net.Conn) {
 		defer conn.Close()
 		io.Copy(conn, client)
 	}()
-	if !majorIsUp {
-		go RTTworker(*majorRemoteAddr, conn, client)
-	}
+	go RTTworker(*majorRemoteAddr, conn, client, !majorIsUp)
 }
 
 func main() {
