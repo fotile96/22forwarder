@@ -26,7 +26,7 @@ func sliceAvg(s []int) int {
 	return ret / len(s)
 }
 
-func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool) {
+func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool, done chan int) {
 	// if remote is up, close both conn and client
 	samples := make([]int, *RTTSmoothWindowSize)
 	if closeOnUp {
@@ -44,6 +44,11 @@ func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool) {
 			return
 		}
 		<- timer.C
+		select {
+		case <- done:
+			return
+		default:
+		}
 		timer.Reset(time.Millisecond*time.Duration(*pingInterval))
 		timeStart := time.Now()
 		conn, err := net.DialTimeout("tcp", remote, time.Millisecond*time.Duration(*pingInterval))
@@ -70,17 +75,20 @@ func forward(conn net.Conn) {
 		}
 	}
 	log.Printf("Forwarding from %v to %v\n", conn.LocalAddr(), client.RemoteAddr())
+	c := make(chan int, 2)
 	go func() {
 		defer client.Close()
 		defer conn.Close()
 		io.Copy(client, conn)
+		c <- 0
 	}()
 	go func() {
 		defer client.Close()
 		defer conn.Close()
 		io.Copy(conn, client)
+		c <- 0
 	}()
-	go RTTworker(*majorRemoteAddr, conn, client, !majorIsUp)
+	go RTTworker(*majorRemoteAddr, conn, client, !majorIsUp, c)
 }
 
 func main() {
