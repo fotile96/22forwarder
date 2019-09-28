@@ -57,7 +57,7 @@ func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool) {
 }
 
 func forward(conn net.Conn) {
-	client, err := net.Dial("tcp", *majorRemoteAddr)
+	client, err := net.DialTimeout("tcp", *majorRemoteAddr, time.Millisecond*time.Duration(*pingInterval))
 	majorIsUp := true
 	if err != nil {
 		log.Printf("Dial failed: %v", err)
