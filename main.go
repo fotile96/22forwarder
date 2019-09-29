@@ -14,8 +14,11 @@ var (
 	minorRemoteAddr = flag.String("minor-remote", ":9200", "host:port to forward to as backup")
 	prefix     = flag.String("p", "tcpforward: ", "String to prefix log output")
 	pingInterval = flag.Int("ping-interval", 1000, "Interval to perform tcping RTT measurement")
+	RTTMeasureDestMajor = flag.String("rtt-dest-major", "", "A remote TCP endpoint used for RTT measurement when major is up")
+	RTTMeasureDestMinor = flag.String("rtt-dest-minor", "", "A remote TCP endpoint used for RTT measurement when major is down")
 	RTTSmoothWindowSize = flag.Int("rtt-window", 5, "Specify the number of latest samples used to calculate average RTT")
-	majorUpThresh = flag.Int("up-thresh", 150, "The maximum RTT under which we regard the major remote as alive")
+	majorUpThresh = flag.Int("up-thresh", 100, "The maximum RTT under which we think the major remote become alive")
+	majorDownThresh = flag.Int("down-thresh", 120, "The minimum RTT under which we think the major remote become dead")
 )
 
 func sliceAvg(s []int) int {
@@ -26,21 +29,28 @@ func sliceAvg(s []int) int {
 	return ret / len(s)
 }
 
-func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool, done chan int) {
-	// if remote is up, close both conn and client
+var majorIsUp = true
+
+func RTTworker(conn net.Conn, client net.Conn, done chan int) {
+	var remote string
 	samples := make([]int, *RTTSmoothWindowSize)
-	if closeOnUp {
+	if majorIsUp {
+		remote = *RTTMeasureDestMajor
+	} else {
+		remote = *RTTMeasureDestMinor
 		for i, _ := range (samples) {
 			samples[i] = *pingInterval
 		}
 	}
 	timer := time.NewTimer(0)
+	time.Sleep(3 * time.Second)
 	for {
 		measuredRTT := sliceAvg(samples)
 		log.Printf("Measured RTT to %s: %d ms.", remote, measuredRTT)
-		if (closeOnUp && measuredRTT <= *majorUpThresh) || (!closeOnUp && measuredRTT > *majorUpThresh) {
+		if (!majorIsUp && measuredRTT <= *majorUpThresh) || (majorIsUp && measuredRTT > *majorDownThresh) {
 			defer conn.Close()
 			defer client.Close()
+			majorIsUp = !majorIsUp
 			return
 		}
 		<- timer.C
@@ -62,17 +72,18 @@ func RTTworker(remote string, conn net.Conn, client net.Conn, closeOnUp bool, do
 }
 
 func forward(conn net.Conn) {
-	client, err := net.DialTimeout("tcp", *majorRemoteAddr, time.Millisecond*time.Duration(*pingInterval))
-	majorIsUp := true
+	var client net.Conn
+	var err error
+	if majorIsUp {
+		client, err = net.DialTimeout("tcp", *majorRemoteAddr, time.Millisecond*time.Duration(*pingInterval))
+	} else {
+		client, err = net.DialTimeout("tcp", *minorRemoteAddr, time.Millisecond*time.Duration(*pingInterval))
+	}
 	if err != nil {
 		log.Printf("Dial failed: %v", err)
-		majorIsUp = false
-		client, err = net.Dial("tcp", *minorRemoteAddr)
-		if err != nil {
-			log.Printf("Dial failed: %v", err)
-			defer conn.Close()
-			return
-		}
+		majorIsUp = !majorIsUp
+		defer conn.Close()
+		return
 	}
 	log.Printf("Forwarding from %v to %v\n", conn.LocalAddr(), client.RemoteAddr())
 	c := make(chan int, 2)
@@ -88,11 +99,18 @@ func forward(conn net.Conn) {
 		io.Copy(conn, client)
 		c <- 0
 	}()
-	go RTTworker(*majorRemoteAddr, conn, client, !majorIsUp, c)
+	// call RTTworker in this goroutine, hence allows at most one incoming connection
+	RTTworker(conn, client, c)
 }
 
 func main() {
 	flag.Parse()
+	if *RTTMeasureDestMajor == "" {
+		*RTTMeasureDestMajor = *majorRemoteAddr
+	}
+	if *RTTMeasureDestMinor == "" {
+		*RTTMeasureDestMinor = *majorRemoteAddr
+	}
 	log.SetPrefix(*prefix + ": ")
 
 	listener, err := net.Listen("tcp", *localAddr)
@@ -106,6 +124,7 @@ func main() {
 			log.Fatalf("ERROR: failed to accept listener: %v", err)
 		}
 		log.Printf("Accepted connection from %v\n", conn.RemoteAddr().String())
-		go forward(conn)
+		//no concurrent incoming connections
+		forward(conn)
 	}
 }
