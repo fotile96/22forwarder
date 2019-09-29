@@ -19,6 +19,8 @@ var (
 	RTTSmoothWindowSize = flag.Int("rtt-window", 5, "Specify the number of latest samples used to calculate average RTT")
 	majorUpThresh = flag.Int("up-thresh", 100, "The maximum RTT under which we think the major remote become alive")
 	majorDownThresh = flag.Int("down-thresh", 120, "The minimum RTT under which we think the major remote become dead")
+	minMinorTime = flag.Int("min-minor-time", 30, "The minimum time to stay at minor backend after switch")
+	maxMinorTime = flag.Int("max-minor-time", 600, "The maximum time to stay at minor backend after switch")
 )
 
 func sliceAvg(s []int) int {
@@ -30,6 +32,7 @@ func sliceAvg(s []int) int {
 }
 
 var majorIsUp = true
+var nextMinorTime int
 
 func RTTworker(conn net.Conn, client net.Conn, done chan int) {
 	var remote string
@@ -42,20 +45,34 @@ func RTTworker(conn net.Conn, client net.Conn, done chan int) {
 			samples[i] = *pingInterval
 		}
 	}
+	switchTime := time.Now()
 	timer := time.NewTimer(0)
 	time.Sleep(3 * time.Second)
 	for {
 		measuredRTT := sliceAvg(samples)
 		log.Printf("Measured RTT to %s: %d ms.", remote, measuredRTT)
-		if (!majorIsUp && measuredRTT <= *majorUpThresh) || (majorIsUp && measuredRTT > *majorDownThresh) {
-			defer conn.Close()
-			defer client.Close()
+		sinceSwitch := time.Since(switchTime)
+		if (!majorIsUp && measuredRTT <= *majorUpThresh && sinceSwitch > time.Duration(nextMinorTime) * time.Second) || (majorIsUp && measuredRTT > *majorDownThresh) {
+			if !majorIsUp {
+				nextMinorTime *= 2
+				if nextMinorTime > *maxMinorTime {
+					nextMinorTime = *maxMinorTime
+				}
+				log.Printf("Switch to major, next time will stay at minor backend for %d seconds.", nextMinorTime)
+			}
 			majorIsUp = !majorIsUp
+			client.Close()
+			conn.Close()
 			return
+		}
+		if majorIsUp && sinceSwitch >= time.Duration(*maxMinorTime) * time.Second {
+			nextMinorTime = *minMinorTime
+			log.Printf("nextMinorTime reset to %d", nextMinorTime)
 		}
 		<- timer.C
 		select {
 		case <- done:
+			log.Printf("Connection to %s closed by application.", remote)
 			return
 		default:
 		}
@@ -88,14 +105,14 @@ func forward(conn net.Conn) {
 	log.Printf("Forwarding from %v to %v\n", conn.LocalAddr(), client.RemoteAddr())
 	c := make(chan int, 2)
 	go func() {
-		defer client.Close()
 		defer conn.Close()
+		defer client.Close()
 		io.Copy(client, conn)
 		c <- 0
 	}()
 	go func() {
-		defer client.Close()
 		defer conn.Close()
+		defer client.Close()
 		io.Copy(conn, client)
 		c <- 0
 	}()
@@ -108,9 +125,12 @@ func main() {
 	if *RTTMeasureDestMajor == "" {
 		*RTTMeasureDestMajor = *majorRemoteAddr
 	}
-	if *RTTMeasureDestMinor == "" {
+
+	nextMinorTime = *minMinorTime
+
+	/*if *RTTMeasureDestMinor == "" {
 		*RTTMeasureDestMinor = *majorRemoteAddr
-	}
+	}*/
 	log.SetPrefix(*prefix + ": ")
 
 	listener, err := net.Listen("tcp", *localAddr)
