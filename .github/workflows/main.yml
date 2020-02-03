@@ -1,6 +1,8 @@
 name: CI
 
-on: [watch]
+on:
+  watch:
+    types: [started]
 
 jobs:
   build:
